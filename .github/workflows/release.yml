@@ -189,10 +189,21 @@ jobs:
           gh release download "$TAG" --repo "$REPO" --dir dist --clobber \
             --pattern 'communique-*.tar.gz' --pattern 'communique-*.zip'
           ls -la dist
-      # A consumer that has this file can generate completions, a man page,
-      # and documentation with its own copy of usage, so nothing of
-      # Communiqué's runs on the machine it is installed on.
-      - name: Publish the CLI specification
+      # The spec supports documentation generation without running the binary.
+      # Native completion scripts call the installed binary on each completion.
+      - name: Install completion syntax checkers
+        timeout-minutes: 5
+        run: |
+          if [[ -f /etc/apt/apt-mirrors.txt ]]; then
+            sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/apt-mirrors.txt
+          fi
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 update
+          sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y zsh fish
+          # Hosted runners include PowerShell; Namespace images have its signed apt repository.
+          if ! command -v pwsh >/dev/null 2>&1; then
+            sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 install -y powershell
+          fi
+      - name: Publish the CLI specification and completions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.tag }}
@@ -201,7 +212,25 @@ jobs:
           mkdir -p bin
           tar -xzf dist/communique-x86_64-unknown-linux-gnu.tar.gz -C bin
           bin/communique usage > communique.usage.kdl
-          gh release upload "$TAG" communique.usage.kdl --repo "$REPO" --clobber
+          for shell in bash zsh fish powershell; do
+            bin/communique completion "$shell" > communique.$shell
+            test -s communique.$shell
+            grep -Fq '__complete_word__' communique.$shell
+            bin/communique __complete_word__ --shell "$shell" --line 'communique ge' | grep -Fq -- 'generate'
+          done
+          bash -n communique.bash
+          zsh -n communique.zsh
+          fish --no-execute communique.fish
+          cat > completion-syntax-check.ps1 <<'POWERSHELL'
+          $ErrorActionPreference = 'Stop'
+          foreach ($script in Get-ChildItem -LiteralPath "." -Filter '*.powershell') {
+            $parseErrors = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($script.FullName, [ref]$null, [ref]$parseErrors)
+            if ($parseErrors.Count) { $parseErrors | Write-Error; exit 1 }
+          }
+          POWERSHELL
+          pwsh -NoProfile -NonInteractive -File completion-syntax-check.ps1
+          gh release upload "$TAG" communique.usage.kdl communique.bash communique.zsh communique.fish communique.powershell --repo "$REPO" --clobber
       - uses: jdx/packslip@a0d434ad57571c62dbd0ab5095b4eff607a71fd3 # v1.1.1
         # The action uploads with `gh release upload` and no `--repo`, and
         # this job has no checkout for gh to infer the repository from.
@@ -211,4 +240,9 @@ jobs:
           tag: ${{ inputs.tag }}
           artifacts: dist/communique-*.tar.gz dist/communique-*.zip
           bin: communique
-          resources: cli-spec/usage=asset:communique.usage.kdl
+          resources: |
+            cli-spec/usage=asset:communique.usage.kdl
+            completion/bash=asset:communique.bash
+            completion/zsh=asset:communique.zsh
+            completion/fish=asset:communique.fish
+            completion/powershell=asset:communique.powershell
